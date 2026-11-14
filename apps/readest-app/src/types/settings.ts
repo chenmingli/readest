@@ -378,6 +378,28 @@ export interface ICloudSettings {
 }
 
 /**
+ * 115 Netdisk (115 网盘) file-sync backend, authenticated with the cookie from
+ * a QR-code sign-in. Device-local, like the other third-party backends.
+ */
+export interface P115Settings {
+  enabled: boolean;
+  /** Cookie header captured from the QR sign-in (`UID=...; CID=...; ...`). */
+  cookie?: string;
+  /** Nickname shown in the integrations row; empty until signed in. */
+  accountLabel?: string;
+  rootPath: string;
+  syncProgress?: boolean;
+  syncNotes?: boolean;
+  syncBooks?: boolean;
+  fullSync?: boolean;
+  strategy?: KOSyncStrategy;
+  deviceId?: string;
+  lastSyncedAt?: number;
+  /** See {@link WebDAVSettings.providerSelectedAt}. */
+  providerSelectedAt?: number;
+}
+
+/**
  * Readest Cloud's own library-sync switch. Readest Cloud used to be the
  * derived fallback — "on" whenever no third-party provider was enabled —
  * because exactly one provider could own the library channels. Providers are
@@ -639,6 +661,7 @@ export interface SystemSettings {
   s3: S3Settings;
   onedrive: OneDriveSettings;
   icloud: ICloudSettings;
+  p115: P115Settings;
 
   aiSettings: AISettings;
   /**

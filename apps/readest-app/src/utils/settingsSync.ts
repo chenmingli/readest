@@ -41,6 +41,8 @@ export interface CloudSyncProviderFlags {
   onedrive?: { enabled: boolean; providerSelectedAt?: number };
   /** Optional: absent on payloads from pre-iCloud windows (treated as unchanged). */
   icloud?: { enabled: boolean; providerSelectedAt?: number };
+  /** Optional: absent on payloads from windows without 115 Netdisk. */
+  p115?: { enabled: boolean; providerSelectedAt?: number };
   /**
    * Optional in two senses: absent on payloads from pre-#5062 windows, and
    * absent when the source window has never had the slice written. `enabled`
@@ -96,6 +98,9 @@ export const mergeSyncedGlobalSettings = (
     if (payload.cloudSyncProviders.icloud) {
       merged.icloud = { ...local.icloud, ...payload.cloudSyncProviders.icloud };
     }
+    if (payload.cloudSyncProviders.p115) {
+      merged.p115 = { ...local.p115, ...payload.cloudSyncProviders.p115 };
+    }
     if (payload.cloudSyncProviders.readestCloud) {
       merged.readestCloud = {
         ...local.readestCloud,
@@ -144,6 +149,10 @@ export const broadcastGlobalSettings = async (
         icloud: {
           enabled: !!settings.icloud?.enabled,
           providerSelectedAt: settings.icloud?.providerSelectedAt,
+        },
+        p115: {
+          enabled: !!settings.p115?.enabled,
+          providerSelectedAt: settings.p115?.providerSelectedAt,
         },
       };
       if (settings.readestCloud) {

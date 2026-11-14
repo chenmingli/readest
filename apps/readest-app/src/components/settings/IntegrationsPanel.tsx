@@ -62,6 +62,8 @@ import ObsidianForm from './integrations/ObsidianForm';
 import SendToReadestForm from './integrations/SendToReadestForm';
 import LocalSendForm from './integrations/LocalSendForm';
 import WebDAVForm from './integrations/WebDAVForm';
+import P115Form from './integrations/P115Form';
+import { hasP115Login } from '@/services/sync/providers/p115/client';
 import GoogleDriveForm from './integrations/GoogleDriveForm';
 import OneDriveForm from './integrations/OneDriveForm';
 import ICloudForm from './integrations/ICloudForm';
@@ -93,6 +95,7 @@ type SubPage =
   | 'bookorbit'
   | 'grimmory'
   | 'webdav'
+  | 'p115'
   | 'gdrive'
   | 's3'
   | 'onedrive'
@@ -155,6 +158,8 @@ const IntegrationsPanel: React.FC = () => {
   const s3LastError = useFileSyncStore((s) => s.lastErrorByKind.s3);
   const onedriveLastError = useFileSyncStore((s) => s.lastErrorByKind.onedrive);
   const isICloudSyncing = useFileSyncStore((s) => s.byKind.icloud?.isSyncing ?? false);
+  const isP115Syncing = useFileSyncStore((s) => s.byKind.p115?.isSyncing ?? false);
+  const p115LastError = useFileSyncStore((s) => s.lastErrorByKind.p115);
   const icloudLastError = useFileSyncStore((s) => s.lastErrorByKind.icloud);
   // "Configured" for iCloud = the container is reachable (an entitled build
   // with an iCloud session). Probed once; Apple Tauri platforms only.
@@ -228,6 +233,7 @@ const IntegrationsPanel: React.FC = () => {
     if (!requestedSubPage) return;
     const isCloudRequest =
       requestedSubPage === 'webdav' ||
+      requestedSubPage === 'p115' ||
       requestedSubPage === 'gdrive' ||
       requestedSubPage === 's3' ||
       requestedSubPage === 'onedrive' ||
@@ -245,6 +251,7 @@ const IntegrationsPanel: React.FC = () => {
       requestedSubPage === 'bookorbit' ||
       requestedSubPage === 'grimmory' ||
       requestedSubPage === 'webdav' ||
+      requestedSubPage === 'p115' ||
       requestedSubPage === 'gdrive' ||
       requestedSubPage === 's3' ||
       requestedSubPage === 'onedrive' ||
@@ -318,6 +325,31 @@ const IntegrationsPanel: React.FC = () => {
                 {_(
                   'App settings, reading statistics, and dictionaries still sync through your Readest account while signed in.',
                 )}
+              </li>
+            </Tips>
+          </div>
+        )}
+      </div>
+    );
+  if (subPage === 'p115')
+    return (
+      <div className='my-4 w-full'>
+        <SubPageHeader
+          parentLabel={_('Integrations')}
+          currentLabel={_('115 Netdisk')}
+          description={_(
+            'Sync your library, reading progress, and highlights with your 115 Netdisk.',
+          )}
+          onBack={() => setSubPage(null)}
+        />
+        <P115Form />
+        {settings.p115?.enabled && (
+          <div className='mt-5'>
+            <Tips>
+              <li>
+                {_('{{provider}} keeps a full copy of your books, progress, and annotations.', {
+                  provider: _('115 Netdisk'),
+                })}
               </li>
             </Tips>
           </div>
@@ -588,6 +620,17 @@ const IntegrationsPanel: React.FC = () => {
       (k) => k !== kind && (settings[settingsKeyForBackend(k)]?.syncBooks ?? false),
     );
 
+  const p115Configured = hasP115Login(settings.p115?.cookie);
+  const p115Status = getThirdPartyRowStatus(_, {
+    enabled: !!settings.p115?.enabled,
+    configured: p115Configured,
+    syncing: isP115Syncing,
+    // 115 is user storage, not a Readest plan feature: never paused.
+    paused: false,
+    lastError: p115LastError,
+    syncBooks: settings.p115?.syncBooks ?? false,
+    booksBackedUpElsewhere: booksBackedUpBy('p115'),
+  });
   const webdavConfigured = !!(settings.webdav?.serverUrl && settings.webdav?.username);
   const gdriveConfigured = !!settings.googleDrive?.accountLabel;
   const webdavStatus = getThirdPartyRowStatus(_, {
@@ -836,6 +879,16 @@ const IntegrationsPanel: React.FC = () => {
               onToggle={(next) => toggleCloudProvider('webdav', next)}
               onOpen={() => (isCloudSyncPremium ? setSubPage('webdav') : navigateToProfile(router))}
               toggleLabel={_('Sync with WebDAV')}
+            />
+            <CloudProviderRow
+              icon={RiCloudLine}
+              title={_('115 Netdisk')}
+              status={p115Status}
+              checked={!!settings.p115?.enabled}
+              canToggle={p115Configured}
+              onToggle={(next) => toggleCloudProvider('p115', next)}
+              onOpen={() => setSubPage('p115')}
+              toggleLabel={_('Sync with 115 Netdisk')}
             />
             <CloudProviderRow
               icon={RiDatabase2Line}

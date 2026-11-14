@@ -20,7 +20,7 @@ export type CloudSyncProviderKind = 'readest' | FileSyncBackendKind;
 /** Settings slice key for a third-party backend kind. */
 export const settingsKeyForBackend = (
   kind: FileSyncBackendKind,
-): 'webdav' | 'googleDrive' | 's3' | 'onedrive' | 'icloud' =>
+): 'webdav' | 'googleDrive' | 's3' | 'onedrive' | 'icloud' | 'p115' =>
   kind === 'gdrive' ? 'googleDrive' : kind;
 
 /** Human-readable provider name (product names — deliberately untranslated). */
@@ -35,7 +35,9 @@ export const cloudProviderDisplayName = (kind: CloudSyncProviderKind): string =>
           ? 'OneDrive'
           : kind === 'icloud'
             ? 'iCloud'
-            : 'Readest Cloud';
+            : kind === 'p115'
+              ? '115 Netdisk'
+              : 'Readest Cloud';
 
 /**
  * The third-party backends the user has switched on, in a STABLE order that
@@ -50,6 +52,7 @@ export const getEnabledFileSyncBackends = (
   if (settings?.s3?.enabled) enabled.push('s3');
   if (settings?.onedrive?.enabled) enabled.push('onedrive');
   if (settings?.icloud?.enabled) enabled.push('icloud');
+  if (settings?.p115?.enabled) enabled.push('p115');
   return enabled;
 };
 
@@ -133,10 +136,13 @@ export const resolveCloudSyncGate = (
   customizationPurchased: boolean = cachedCustomizationPurchased,
 ): CloudSyncGate => {
   const backends = getEnabledFileSyncBackends(settings);
+  // 115 is a user-supplied storage target, not a Readest plan feature, so it
+  // must keep syncing on free accounts: only the other backends pause.
+  const gated = backends.filter((kind) => kind !== 'p115');
   return {
     readest: isReadestCloudEnabled(settings),
     backends,
-    paused: backends.length > 0 && !isCloudSyncAllowed(plan, customizationPurchased),
+    paused: gated.length > 0 && !isCloudSyncAllowed(plan, customizationPurchased),
   };
 };
 
@@ -146,7 +152,9 @@ export const getActiveFileSyncBackends = (
   plan?: UserPlan,
 ): FileSyncBackendKind[] => {
   const gate = resolveCloudSyncGate(settings, plan);
-  return gate.paused ? [] : gate.backends;
+  // A paused gate stops the plan-gated providers, never 115: it is the
+  // user's own storage and must keep working alongside them.
+  return gate.paused ? gate.backends.filter((kind) => kind === 'p115') : gate.backends;
 };
 
 /**
@@ -192,6 +200,12 @@ export const applySyncBooksAutoEnable = (settings: SystemSettings): boolean => {
       case 'icloud':
         if (settings.icloud && !settings.icloud.syncBooks) {
           settings.icloud = { ...settings.icloud, syncBooks: true };
+          changed = true;
+        }
+        break;
+      case 'p115':
+        if (settings.p115 && !settings.p115.syncBooks) {
+          settings.p115 = { ...settings.p115, syncBooks: true };
           changed = true;
         }
         break;

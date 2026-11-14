@@ -227,6 +227,9 @@ export const useFileSync = (bookKey: string) => {
           case 'icloud':
             next = { ...next, icloud: { ...next.icloud, lastSyncedAt: ts } };
             break;
+          case 'p115':
+            next = { ...next, p115: { ...next.p115, lastSyncedAt: ts } };
+            break;
         }
       }
       setSettings(next);
@@ -248,8 +251,16 @@ export const useFileSync = (bookKey: string) => {
       `gdrive:${settings.googleDrive?.enabled}`,
       `s3:${c?.endpoint}:${c?.region}:${c?.bucket}:${c?.accessKeyId}:${c?.secretAccessKey}`,
       `onedrive:${settings.onedrive?.enabled}`,
+      `p115:${settings.p115?.enabled}:${settings.p115?.cookie}:${settings.p115?.rootPath}`,
     ].join('|');
-  }, [activeKindsKey, settings.webdav, settings.googleDrive, settings.s3, settings.onedrive]);
+  }, [
+    activeKindsKey,
+    settings.webdav,
+    settings.googleDrive,
+    settings.s3,
+    settings.onedrive,
+    settings.p115,
+  ]);
 
   const [engines, setEngines] = useState<
     Array<{ kind: FileSyncBackendKind; engine: FileSyncEngine }>

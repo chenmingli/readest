@@ -35,6 +35,7 @@ import {
   S3Settings,
   OneDriveSettings,
   ICloudSettings,
+  P115Settings,
 } from '@/types/settings';
 import { UserStorageQuota, UserDailyTranslationQuota, UserDailyTTSQuota } from '@/types/quota';
 import { getDefaultMaxBlockSize, getDefaultMaxInlineSize } from '@/utils/config';
@@ -227,6 +228,19 @@ export const DEFAULT_ICLOUD_SETTINGS = {
   lastSyncedAt: 0,
 } as ICloudSettings;
 
+export const DEFAULT_P115_SETTINGS = {
+  enabled: false,
+  cookie: '',
+  accountLabel: '',
+  rootPath: '/',
+  syncProgress: true,
+  syncNotes: true,
+  syncBooks: false,
+  strategy: 'silent',
+  deviceId: '',
+  lastSyncedAt: 0,
+} as P115Settings;
+
 export const DEFAULT_SYSTEM_SETTINGS: Partial<SystemSettings> = {
   keepLogin: false,
   alwaysOnTop: false,
@@ -299,6 +313,7 @@ export const DEFAULT_SYSTEM_SETTINGS: Partial<SystemSettings> = {
   s3: DEFAULT_S3_SETTINGS,
   onedrive: DEFAULT_ONEDRIVE_SETTINGS,
   icloud: DEFAULT_ICLOUD_SETTINGS,
+  p115: DEFAULT_P115_SETTINGS,
   aiSettings: DEFAULT_AI_SETTINGS,
 
   lastSyncedAtBooks: 0,

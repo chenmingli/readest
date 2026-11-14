@@ -72,6 +72,7 @@ const ICONS: Record<ConnectorId, React.ElementType> = {
   s3: RiDatabase2Line,
   onedrive: RiMicrosoftLine,
   icloud: RiAppleLine,
+  p115: RiCloudLine,
 };
 
 const HEALTH_ICONS = { ok: RiCheckLine, failed: RiAlertLine, unknown: RiSubtractLine };

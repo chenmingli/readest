@@ -13,15 +13,16 @@
 import type { FileSyncProvider } from './provider';
 import { withTransferLog } from './transferLog';
 import { buildBasePath, SYNC_LIBRARY_FILE } from './layout';
-import type { S3Settings, WebDAVSettings } from '@/types/settings';
+import type { P115Settings, S3Settings, WebDAVSettings } from '@/types/settings';
 import { createWebDAVProvider } from '@/services/sync/providers/webdav/WebDAVProvider';
 import { checkConnection as checkWebDAVConnection } from '@/services/sync/providers/webdav/client';
 import { buildGoogleDriveProvider } from '@/services/sync/providers/gdrive/buildGoogleDriveProvider';
 import { buildOneDriveProvider } from '@/services/sync/providers/onedrive/buildOneDriveProvider';
 import { buildICloudProvider } from '@/services/sync/providers/icloud/buildICloudProvider';
 import { createS3Provider } from '@/services/sync/providers/s3/S3Provider';
+import { createP115Provider } from '@/services/sync/providers/p115/P115Provider';
 
-export type FileSyncBackendKind = 'webdav' | 'gdrive' | 's3' | 'onedrive' | 'icloud';
+export type FileSyncBackendKind = 'webdav' | 'gdrive' | 's3' | 'onedrive' | 'icloud' | 'p115';
 
 /** Minimal settings the registry reads to pick + build backends. */
 export interface FileSyncBackendsSettings {
@@ -30,6 +31,7 @@ export interface FileSyncBackendsSettings {
   s3?: S3Settings;
   onedrive?: { enabled?: boolean };
   icloud?: { enabled?: boolean };
+  p115?: P115Settings;
 }
 
 /**
@@ -67,6 +69,10 @@ const providerCacheKey = (
   }
   if (kind === 'onedrive') return 'onedrive';
   if (kind === 'icloud') return 'icloud';
+  if (kind === 'p115') {
+    const c = settings.p115;
+    return `p115:${c?.enabled}:${c?.cookie}:${c?.rootPath}`;
+  }
   return 'gdrive';
 };
 
@@ -132,7 +138,11 @@ const getFileSyncProvider = async (
           ? await buildOneDriveProvider()
           : kind === 'icloud'
             ? await buildICloudProvider()
-            : await buildGoogleDriveProvider();
+            : kind === 'p115'
+              ? settings.p115
+                ? createP115Provider(settings.p115)
+                : null
+              : await buildGoogleDriveProvider();
   if (!provider) return null;
   const entry = { key, provider, logged: withTransferLog(provider, kind) };
   providerCache.set(kind, entry);
