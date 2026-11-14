@@ -1,0 +1,164 @@
+name: Fork Release (unsigned desktop)
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.12.20-p115.1)'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      release_id: ${{ steps.release.outputs.release_id }}
+    steps:
+      - name: ensure release exists
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-$GITHUB_REF_NAME}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" --json databaseId >/dev/null 2>&1; then
+            echo "release $tag already exists"
+          else
+            if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
+              extra=(--verify-tag)
+            else
+              extra=(--target "$GITHUB_SHA")
+            fi
+            gh release create "$tag" \
+              --title "Readest $tag (unsigned fork build)" \
+              --notes "Unofficial fork build with the 115 Netdisk file-sync provider. Artifacts are unsigned: macOS builds are not notarized, Windows installers have no Authenticode signature, and Linux packages have no repository signature. The macOS build intentionally omits the iCloud entitlements profile, so iCloud sync is unavailable in this build." \
+              "${extra[@]}"
+          fi
+          id=$(gh release view "$tag" --json databaseId --jq .databaseId)
+          echo "release_id=$id" >> "$GITHUB_OUTPUT"
+          echo "release id: $id"
+
+  build:
+    needs: release
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            release: macos
+            arch: universal
+            rust_target: x86_64-apple-darwin,aarch64-apple-darwin
+            args: '--target universal-apple-darwin --bundles dmg --config src-tauri/tauri.unsigned.conf.json'
+          - os: ubuntu-22.04
+            release: linux
+            arch: x86_64
+            rust_target: x86_64-unknown-linux-gnu
+            args: '--bundles deb,appimage --config src-tauri/tauri.unsigned.conf.json'
+          - os: windows-latest
+            release: windows
+            arch: x86_64
+            rust_target: x86_64-pc-windows-msvc
+            args: '--target x86_64-pc-windows-msvc --bundles nsis --config src-tauri/tauri.unsigned.conf.json'
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: initialize git submodules
+        run: git submodule update --init --recursive
+
+      - name: setup pnpm
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+
+      - name: setup node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: install dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: copy pdfjs-dist and simplecc-dist to public directory
+        run: pnpm --filter @readest/readest-app setup-vendors
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        with:
+          key: fork-${{ matrix.os }}-${{ matrix.release }}-${{ matrix.arch }}-cargo
+
+      - name: install the CEF tauri CLI from readest/tauri (linux only)
+        if: matrix.release == 'linux'
+        run: |
+          set -euo pipefail
+          rev=6beeb209b5514f597a26f48b7a5b9fe4c59b5f12
+          marker="$HOME/.cargo/bin/.cargo-tauri-rev"
+          if [ -x "$HOME/.cargo/bin/cargo-tauri" ] && [ "$(cat "$marker" 2>/dev/null)" = "$rev" ]; then
+            echo "cargo-tauri at $rev already installed"
+            exit 0
+          fi
+          cargo install tauri-cli --git https://github.com/readest/tauri --rev "$rev" --locked --force
+          echo "$rev" > "$marker"
+
+      - name: install dependencies (ubuntu only)
+        if: matrix.release == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libclang-dev g++ libfontconfig-dev libgtk-3-dev libwebkit2gtk-4.1 libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1 libjavascriptcoregtk-4.1-dev gir1.2-javascriptcoregtk-4.1 gir1.2-webkit2-4.1 libappindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - name: stage CEF AppImage runtime libraries (linux only)
+        if: matrix.release == 'linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y libnss3 libpulse0 libspeechd2 libxkbcommon-x11-0
+          nss_dir=$(dirname "$(ls /usr/lib/*-linux-gnu/nss/libsoftokn3.so)")
+          lib_dir=${nss_dir%/nss}
+          sudo cp -f --remove-destination "$nss_dir"/*.so "$lib_dir/"
+          conf=apps/readest-app/src-tauri/tauri.conf.json
+          jq --arg d "$lib_dir" '.bundle.linux.appimage.files += {
+              "/usr/lib/libspeechd.so.2": ($d + "/libspeechd.so.2"),
+              "/usr/lib/libxkbcommon-x11.so.0": ($d + "/libxkbcommon-x11.so.0")
+            }' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+
+      - name: create .env.local file for Next.js
+        shell: bash
+        run: |
+          echo "NEXT_PUBLIC_APP_PLATFORM=tauri" >> .env.local
+          echo "SENTRY_ORG=readest" >> .env.local
+          echo "SENTRY_PROJECT=readest" >> .env.local
+          cp .env.local apps/readest-app/.env.local
+
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+        id: tauri
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_CEF_CARGO: '1'
+          STRACE_MODE: '0'
+          NODE_OPTIONS: '--max-old-space-size=8192'
+        with:
+          projectPath: apps/readest-app
+          tauriScript: pnpm tauri
+          releaseId: ${{ needs.release.outputs.release_id }}
+          args: ${{ matrix.args }}
+          includeUpdaterJson: false
+          retryAttempts: 2
