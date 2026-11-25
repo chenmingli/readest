@@ -71,7 +71,7 @@ const providerCacheKey = (
   if (kind === 'icloud') return 'icloud';
   if (kind === 'p115') {
     const c = settings.p115;
-    return `p115:${c?.enabled}:${c?.cookie}:${c?.rootPath}`;
+    return `p115:${c?.enabled}:${c?.authMode}:${c?.clientId}:${c?.refreshToken}:${c?.cookie}:${c?.rootPath}`;
   }
   return 'gdrive';
 };

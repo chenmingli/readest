@@ -15,6 +15,20 @@ import {
   FileSyncProvider,
 } from '@/services/sync/file/provider';
 import { P115Client, P115Entry } from './client';
+import { Open115Client } from './openClient';
+
+/**
+ * The two 115 clients share the surface this provider needs; the cookie
+ * client talks to the web API, the Open Platform client to `/open/*`.
+ */
+type P115Backend = P115Client | Open115Client;
+
+/**
+ * The web download endpoint (`webapi.115.com/files/download`) serves files up
+ * to about 200 MB; larger ones need the 115 client or the open API. We only
+ * use this to turn an opaque failure into an actionable message.
+ */
+const WEB_DOWNLOAD_LIMIT_BYTES = 200 * 1024 * 1024;
 
 const normalizeRootPath = (path: string): string => {
   const trimmed = (path || '').trim().replace(/^\/+|\/+$/g, '');
@@ -24,20 +38,41 @@ const normalizeRootPath = (path: string): string => {
 const joinPath = (dir: string, name: string): string =>
   dir === '/' ? `/${name}` : `${dir}/${name}`;
 
-export const createP115Provider = (settings: P115Settings): FileSyncProvider | null => {
-  if (!settings.cookie) return null;
-  return new P115Provider(settings);
+export const createP115Provider = (
+  settings: P115Settings,
+  client?: P115Backend,
+): FileSyncProvider | null => {
+  if (!client) {
+    if (settings.authMode === 'open') {
+      if (!settings.clientId || (!settings.refreshToken && !settings.accessToken)) return null;
+    } else if (!settings.cookie) {
+      return null;
+    }
+  }
+  return new P115Provider(settings, client);
 };
 
-class P115Provider implements FileSyncProvider {
+export class P115Provider implements FileSyncProvider {
   readonly rootPath: string;
-  private readonly client: P115Client;
+  private readonly client: P115Backend;
   private readonly dirIds = new Map<string, string>();
   private readonly entryCache = new Map<string, { at: number; entries: P115Entry[] }>();
+  private readonly resolving = new Map<string, Promise<string | null>>();
 
-  constructor(settings: P115Settings) {
+  constructor(settings: P115Settings, client?: P115Backend) {
     this.rootPath = normalizeRootPath(settings.rootPath);
-    this.client = new P115Client(settings.cookie ?? '');
+    if (client) {
+      this.client = client;
+    } else if (settings.authMode === 'open') {
+      this.client = new Open115Client({
+        clientId: settings.clientId ?? '',
+        accessToken: settings.accessToken,
+        refreshToken: settings.refreshToken,
+        accessTokenExpiresAt: settings.accessTokenExpiresAt,
+      });
+    } else {
+      this.client = new P115Client(settings.cookie ?? '');
+    }
   }
 
   private segments(path: string): string[] {
@@ -52,8 +87,21 @@ class P115Provider implements FileSyncProvider {
     return entries;
   }
 
-  /** Walk `path` from the drive root, optionally creating missing folders. */
-  private async resolveDir(path: string, create: boolean): Promise<string | null> {
+  /**
+   * Walk `path` from the drive root, optionally creating missing folders.
+   * Concurrent callers asking for the same path share one walk so a sync
+   * batch never creates duplicate folders.
+   */
+  private resolveDir(path: string, create: boolean): Promise<string | null> {
+    const key = `${create ? 'create' : 'read'}:${path}`;
+    const pending = this.resolving.get(key);
+    if (pending) return pending;
+    const walk = this.resolveDirInner(path, create).finally(() => this.resolving.delete(key));
+    this.resolving.set(key, walk);
+    return walk;
+  }
+
+  private async resolveDirInner(path: string, create: boolean): Promise<string | null> {
     let cid = '0';
     let current = '';
     for (const segment of this.segments(path)) {
@@ -71,7 +119,23 @@ class P115Provider implements FileSyncProvider {
         continue;
       }
       if (!create) return null;
-      cid = await this.client.mkdir(cid, segment);
+      try {
+        cid = await this.client.mkdir(cid, segment);
+      } catch (error) {
+        // A raced writer (or a POST whose response was lost) may have created
+        // it already; adopt that folder instead of failing the whole sync.
+        let created: P115Entry | undefined;
+        try {
+          this.entryCache.delete(cid);
+          created = (await this.client.listDir(cid)).find(
+            (entry) => entry.name === segment && entry.isDirectory,
+          );
+        } catch {
+          // Keep the original mkdir failure.
+        }
+        if (!created?.cid) throw error;
+        cid = created.cid;
+      }
       this.dirIds.set(current, cid);
       this.entryCache.delete(cid);
     }
@@ -105,8 +169,26 @@ class P115Provider implements FileSyncProvider {
       const found = await this.findEntry(path);
       if (!found || found.entry.isDirectory) return null;
       if (!found.entry.pickCode) return null;
-      const target = await this.client.downloadUrl(found.entry.pickCode);
-      return await this.client.download(target.url, target.cookies);
+      try {
+        const target = await this.client.downloadUrl(found.entry.pickCode);
+        return await this.client.download(target.url, target.cookies);
+      } catch (error) {
+        const size = found.entry.size;
+        if (
+          this.client.kind === 'cookie' &&
+          size !== undefined &&
+          size > WEB_DOWNLOAD_LIMIT_BYTES &&
+          error instanceof FileSyncError &&
+          (error.code === 'AUTH_FAILED' || error.code === 'UNKNOWN')
+        ) {
+          throw new FileSyncError(
+            `115 could not download this ${Math.round(size / (1024 * 1024))} MB file; ` +
+              'the web download endpoint is limited to about 200 MB',
+            error.code,
+          );
+        }
+        throw error;
+      }
     } catch (error) {
       this.wrap(error);
     }
@@ -156,7 +238,7 @@ class P115Provider implements FileSyncProvider {
       const entries = await this.listCached(parentId);
       const existing = entries.find((entry) => entry.name === name && !entry.isDirectory);
       if (existing?.fid) {
-        await this.client.delete(existing.fid);
+        await this.client.delete(existing.fid, parentId);
         this.entryCache.delete(parentId);
       }
       await this.client.upload(parentId, name, body);
@@ -181,7 +263,10 @@ class P115Provider implements FileSyncProvider {
       const normalized = normalizeRootPath(path);
       const cid = await this.resolveDir(normalized, false);
       if (!cid) return;
-      await this.client.delete(cid);
+      const parentPath =
+        normalized === '/' ? null : normalized.slice(0, normalized.lastIndexOf('/')) || '/';
+      const parentId = parentPath ? await this.resolveDir(parentPath, false) : null;
+      await this.client.delete(cid, parentId ?? '0');
       for (const key of [...this.dirIds.keys()]) {
         if (key === normalized || key.startsWith(`${normalized}/`)) this.dirIds.delete(key);
       }

@@ -19,6 +19,8 @@ const WEBAPI_BASE = 'https://webapi.115.com';
 const QRCODE_BASE = 'https://qrcodeapi.115.com';
 const UPLB_BASE = 'https://uplb.115.com';
 const REQUEST_TIMEOUT_MS = 30_000;
+/** Retry budget for transient failures (network, 429, 5xx). */
+const MAX_ATTEMPTS = 3;
 /**
  * 115 binds a download link to the requesting agent (`f=3` in the signed URL
  * demands the same user-agent and the cookies set by the metadata response).
@@ -84,6 +86,15 @@ const asNumber = (value: unknown): number | undefined => {
 const errorFrom = (message: string, code: FileSyncErrorCode, status?: number): FileSyncError =>
   new FileSyncError(message, code, status);
 
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * 115 signals an expired web session with errno 990001 (or a WAF page), which
+ * the engine should treat as a credentials problem so the UI asks for a
+ * re-scan instead of showing an opaque network error.
+ */
+const AUTH_ERRNO = 990001;
+
 /** Map an HTTP status to the engine's neutral error code. */
 const codeForStatus = (status: number): FileSyncErrorCode => {
   if (status === 401 || status === 403) return 'AUTH_FAILED';
@@ -93,11 +104,22 @@ const codeForStatus = (status: number): FileSyncErrorCode => {
   return 'UNKNOWN';
 };
 
-export class P115Client {
-  readonly cookie: string;
+export interface P115ClientOptions {
+  /** Injection points for tests; production uses the Tauri HTTP plugin. */
+  fetch?: typeof fetch;
+  sleep?: (ms: number) => Promise<void>;
+}
 
-  constructor(cookie: string) {
+export class P115Client {
+  readonly kind = 'cookie' as const;
+  readonly cookie: string;
+  private readonly fetchFn: typeof fetch;
+  private readonly sleepFn: (ms: number) => Promise<void>;
+
+  constructor(cookie: string, options: P115ClientOptions = {}) {
     this.cookie = cookie.trim();
+    this.fetchFn = options.fetch ?? nativeFetch;
+    this.sleepFn = options.sleep ?? sleep;
   }
 
   get uid(): string {
@@ -109,51 +131,78 @@ export class P115Client {
     url: string,
     init: RequestInit = {},
     extraCookies: string[] = [],
+    options: { retry?: boolean } = {},
   ): Promise<Response> {
     if (!isTauri()) {
       throw errorFrom('115 Netdisk sync requires the desktop app', 'AUTH_FAILED');
     }
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-    try {
-      const headers = new Headers(init.headers);
-      headers.set('User-Agent', USER_AGENT);
-      const cookie = [this.cookie, ...extraCookies].filter(Boolean).join('; ');
-      if (cookie) headers.set('Cookie', cookie);
-      return await nativeFetch(url, { ...init, headers, signal: controller.signal });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw errorFrom(`115 request failed: ${message}`, 'NETWORK');
-    } finally {
-      clearTimeout(timer);
+    const retry = options.retry ?? true;
+    for (let attempt = 1; ; attempt += 1) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      try {
+        const headers = new Headers(init.headers);
+        headers.set('User-Agent', USER_AGENT);
+        const cookie = [this.cookie, ...extraCookies].filter(Boolean).join('; ');
+        if (cookie) headers.set('Cookie', cookie);
+        const response = await this.fetchFn(url, { ...init, headers, signal: controller.signal });
+        const transient = response.status === 429 || response.status >= 500;
+        if (retry && transient && attempt < MAX_ATTEMPTS) {
+          await this.sleepFn(400 * 2 ** (attempt - 1) + Math.floor(Math.random() * 150));
+          continue;
+        }
+        return response;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (retry && attempt < MAX_ATTEMPTS) {
+          await this.sleepFn(400 * 2 ** (attempt - 1) + Math.floor(Math.random() * 150));
+          continue;
+        }
+        throw errorFrom(`115 request failed: ${message}`, 'NETWORK');
+      } finally {
+        clearTimeout(timer);
+      }
     }
   }
 
-  private async json(url: string, init: RequestInit = {}, requireState = true): Promise<Json> {
-    const response = await this.request(url, init);
+  private async json(
+    url: string,
+    init: RequestInit = {},
+    requireState = true,
+    options: { retry?: boolean } = {},
+  ): Promise<Json> {
+    const response = await this.request(url, init, [], options);
     const text = await response.text();
     let body: Json;
     try {
       body = JSON.parse(text) as Json;
     } catch {
+      const hint =
+        response.status === 403 || response.status === 405
+          ? ' (115 rejected the request; the login may have expired)'
+          : '';
       throw errorFrom(
-        `115 returned a non-JSON response (${response.status})`,
+        `115 returned a non-JSON response (${response.status})${hint}`,
         codeForStatus(response.status),
         response.status,
       );
     }
+    const errno = asNumber(body['errno']);
     const state = body['state'];
     const ok = state === true || state === 1;
     if (!response.ok || (requireState && !ok)) {
-      const code =
+      let code: FileSyncErrorCode =
         response.status === 401 || response.status === 403
           ? 'AUTH_FAILED'
           : codeForStatus(response.status);
+      if (errno === AUTH_ERRNO) code = 'AUTH_FAILED';
       const message =
-        asString(body['error']) ??
-        asString(body['message']) ??
-        asString(body['msg']) ??
-        `115 error (${response.status})`;
+        errno === AUTH_ERRNO
+          ? '115 login expired, scan the QR code again in Settings'
+          : (asString(body['error']) ??
+            asString(body['message']) ??
+            asString(body['msg']) ??
+            `115 error (${response.status})`);
       throw errorFrom(`115: ${message}`, code, response.status);
     }
     return body;
@@ -246,22 +295,32 @@ export class P115Client {
   }
 
   async mkdir(parentId: string, name: string): Promise<string> {
-    const body = await this.json(`${WEBAPI_BASE}/files/add`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: this.form({ cname: name, pid: parentId }).toString(),
-    });
+    const body = await this.json(
+      `${WEBAPI_BASE}/files/add`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: this.form({ cname: name, pid: parentId }).toString(),
+      },
+      true,
+      { retry: false },
+    );
     const cid = asString(body['cid']) ?? asString(((body['data'] ?? {}) as Json)['cid']);
     if (!cid) throw errorFrom(`115 could not create folder ${name}`, 'UNKNOWN');
     return cid;
   }
 
-  async delete(id: string): Promise<void> {
-    await this.json(`${WEBAPI_BASE}/rb/delete`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: this.form({ fid: id }).toString(),
-    });
+  async delete(id: string, _parentId?: string): Promise<void> {
+    await this.json(
+      `${WEBAPI_BASE}/rb/delete`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: this.form({ fid: id }).toString(),
+      },
+      true,
+      { retry: false },
+    );
   }
 
   /** Resolve a pick code to a temporary download URL. */

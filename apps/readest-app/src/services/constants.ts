@@ -230,7 +230,10 @@ export const DEFAULT_ICLOUD_SETTINGS = {
 
 export const DEFAULT_P115_SETTINGS = {
   enabled: false,
+  authMode: 'cookie',
   cookie: '',
+  clientId: '',
+  refreshToken: '',
   accountLabel: '',
   rootPath: '/',
   syncProgress: true,

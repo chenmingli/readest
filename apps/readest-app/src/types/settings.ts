@@ -383,8 +383,20 @@ export interface ICloudSettings {
  */
 export interface P115Settings {
   enabled: boolean;
+  /**
+   * `cookie` keeps the legacy web-API session; `open` uses the 115 Open
+   * Platform OAuth device flow and the long-lived refresh token.
+   */
+  authMode?: 'cookie' | 'open';
   /** Cookie header captured from the QR sign-in (`UID=...; CID=...; ...`). */
   cookie?: string;
+  /** App id from the 115 Open Platform (PKCE device flow client id). */
+  clientId?: string;
+  /** Rotating OAuth tokens returned by the Open Platform. */
+  accessToken?: string;
+  refreshToken?: string;
+  /** Epoch milliseconds at which {@link accessToken} expires. */
+  accessTokenExpiresAt?: number;
   /** Nickname shown in the integrations row; empty until signed in. */
   accountLabel?: string;
   rootPath: string;
